@@ -1,0 +1,6 @@
+survey.pdf
+paper.index
+chunks.pkl
+__pycache__/
+*.pyc
+*.pkl
