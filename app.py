@@ -125,18 +125,35 @@ def ask():
     global current_index, current_chunks, current_pages
 
     if current_index is None:
-        return jsonify({'answer': '请先上传PDF文件'}), 400
+        return jsonify({'answer': '⚠️ 请先上传PDF文件'}), 400
 
-    question = request.json.get('question')
+    # 问题为空判断
+    data = request.get_json()
+    if not data or not data.get('question', '').strip():
+        return jsonify({'answer': '⚠️ 问题不能为空'}), 400
+    question = data['question'].strip()
 
-    # 检索
-    q_vector = np.array(get_embedding([question])).astype('float32')
-    distances, indices = current_index.search(q_vector, 5)
-    relevant_chunks = [current_chunks[i] for i in indices[0]]
-    relevant_pages = [current_pages[i] for i in indices[0]]
-    context = "\n\n".join(relevant_chunks)
+    # 问题长度限制
+    if len(question) > 500:
+        return jsonify({'answer': '⚠️ 问题太长，请控制在500字以内'}), 400
 
-    prompt = f"""你是一个论文问答助手。请严格根据下面提供的论文片段回答用户的问题，不要编造任何不在原文中的内容。如果提供的内容不足以回答问题，请直接说"根据论文内容无法回答这个问题"。用中文回答。
+    try:
+        # 检索
+        q_vector = np.array(get_embedding([question])).astype('float32')
+        distances, indices = current_index.search(q_vector, 5)
+        relevant_chunks = [current_chunks[i] for i in indices[0]]
+        relevant_pages = [current_pages[i] for i in indices[0]]
+
+        # 相似度过滤：距离太大说明检索内容不相关
+        min_distance = float(distances[0][0])
+        if min_distance > 2.0:
+            return jsonify({
+                'answer': '⚠️ 未找到与问题相关的论文内容，请换个问法或确认论文是否包含相关内容',
+                'sources': []
+            })
+
+        context = "\n\n".join(relevant_chunks)
+        prompt = f"""你是一个论文问答助手。请严格根据下面提供的论文片段回答用户的问题，不要编造任何不在原文中的内容。如果提供的内容不足以回答问题，请直接说"根据论文内容无法回答这个问题"。用中文回答。
 
 论文片段：
 {context}
@@ -145,14 +162,24 @@ def ask():
 
 请基于以上论文片段直接回答，不要说"根据您提供的内容"这类废话，直接给出答案。
 """
-    response = client.chat.completions.create(
-        model="Qwen/Qwen2.5-72B-Instruct",
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return jsonify({
-        'answer': response.choices[0].message.content,
-        'sources': list(set(relevant_pages))  # 去重后的页码列表
-    })
+        response = client.chat.completions.create(
+            model="Qwen/Qwen2.5-72B-Instruct",
+            messages=[{"role": "user", "content": prompt}],
+            timeout=30  # 超时30秒
+        )
+        return jsonify({
+            'answer': response.choices[0].message.content,
+            'sources': list(set(relevant_pages))
+        })
+
+    except Exception as e:
+        error_msg = str(e)
+        if 'timeout' in error_msg.lower():
+            return jsonify({'answer': '⚠️ 请求超时，请稍后重试'}), 503
+        elif 'rate' in error_msg.lower():
+            return jsonify({'answer': '⚠️ API调用频率超限，请稍等几秒再试'}), 429
+        else:
+            return jsonify({'answer': f'⚠️ 系统错误：{error_msg}'}), 500
 
 
 HTML = """
