@@ -7,23 +7,28 @@ import fitz
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from openai import OpenAI
 import os
+from dotenv import load_dotenv
+
+load_dotenv()  # 加载 .env 文件
+API_KEY = os.getenv("SILICONFLOW_API_KEY")  # 从环境变量读取
 
 app = Flask(__name__)
 
 client = OpenAI(
-    api_key="sk-uovrzvonsmrntvtcxhsjdcujinhkiouuqgjifyjthmyxheng",
+    api_key=API_KEY,
     base_url="https://api.siliconflow.cn/v1"
 )
 
 # 全局变量，存当前加载的索引和文字块
 current_index = None
 current_chunks = None
+current_pages = None
 
 
 def get_embedding(texts):
     url = "https://api.siliconflow.cn/v1/embeddings"
     headers = {
-        "Authorization": "Bearer sk-uovrzvonsmrntvtcxhsjdcujinhkiouuqgjifyjthmyxheng",
+        "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json"
     }
     all_vectors = []
@@ -40,31 +45,51 @@ def get_embedding(texts):
 
 
 def build_index(pdf_path):
-    # 提取文字
     doc = fitz.open(pdf_path)
     full_text = ""
-    for page in doc:
-        full_text += page.get_text()
+    page_map = []  # 记录每块文字来自哪页
+
+    for page_num, page in enumerate(doc):
+        text = page.get_text()
+        start = len(full_text)
+        full_text += text
+        page_map.append((start, len(full_text), page_num + 1))
 
     if "References" in full_text:
         full_text = full_text[:full_text.rfind("References")]
 
-    # 切片
     splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
     chunks = splitter.split_text(full_text)
 
-    # 建索引
+    # 给每块找到对应页码
+    chunk_pages = []
+    search_pos = 0
+    for chunk in chunks:
+        chunk_start = full_text.find(chunk, search_pos)
+        if chunk_start == -1:
+            chunk_start = full_text.find(chunk)  # 回退：从头搜
+        if chunk_start == -1:
+            chunk_pages.append(1)  # 实在找不到，默认第1页
+            continue
+        page_num = 1
+        for start, end, pnum in page_map:
+            if start <= chunk_start < end:
+                page_num = pnum
+                break
+        chunk_pages.append(page_num)
+        search_pos = chunk_start + 1
+
     vectors = get_embedding(chunks)
     vectors_np = np.array(vectors).astype('float32')
     index = faiss.IndexFlatL2(len(vectors_np[0]))
     index.add(vectors_np)
 
-    return index, chunks
+    return index, chunks, chunk_pages
 
 
 @app.route('/upload', methods=['POST'])
 def upload():
-    global current_index, current_chunks
+    global current_index, current_chunks, current_pages
 
     if 'file' not in request.files:
         return jsonify({'error': '没有文件'}), 400
@@ -79,14 +104,14 @@ def upload():
     file.save(pdf_path)
 
     # 建索引
-    current_index, current_chunks = build_index(pdf_path)
+    current_index, current_chunks, current_pages = build_index(pdf_path)
 
     return jsonify({'message': f'上传成功，共处理{len(current_chunks)}个文字块，可以开始提问了'})
 
 
 @app.route('/ask', methods=['POST'])
 def ask():
-    global current_index, current_chunks
+    global current_index, current_chunks, current_pages
 
     if current_index is None:
         return jsonify({'answer': '请先上传PDF文件'}), 400
@@ -97,6 +122,7 @@ def ask():
     q_vector = np.array(get_embedding([question])).astype('float32')
     distances, indices = current_index.search(q_vector, 5)
     relevant_chunks = [current_chunks[i] for i in indices[0]]
+    relevant_pages = [current_pages[i] for i in indices[0]]
     context = "\n\n".join(relevant_chunks)
 
     prompt = f"""你是一个论文问答助手。请严格根据下面提供的论文片段回答用户的问题，不要编造任何不在原文中的内容。如果提供的内容不足以回答问题，请直接说"根据论文内容无法回答这个问题"。用中文回答。
@@ -112,7 +138,10 @@ def ask():
         model="Qwen/Qwen2.5-72B-Instruct",
         messages=[{"role": "user", "content": prompt}]
     )
-    return jsonify({'answer': response.choices[0].message.content})
+    return jsonify({
+        'answer': response.choices[0].message.content,
+        'sources': list(set(relevant_pages))  # 去重后的页码列表
+    })
 
 
 HTML = """
@@ -179,6 +208,10 @@ HTML = """
             });
             const data = await res.json();
             document.getElementById('answer').innerText = data.answer;
+            if (data.sources) {
+                document.getElementById('answer').innerText += 
+                    '\\n\\n📄 参考页码：第' + data.sources.join('、') + '页';
+                    }
         }
 
         document.getElementById('question').addEventListener('keypress', function(e) {

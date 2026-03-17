@@ -1,6 +1,8 @@
+.env
 survey.pdf
 paper.index
 chunks.pkl
+uploads/
 __pycache__/
 *.pyc
 *.pkl
