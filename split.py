@@ -8,6 +8,9 @@ def extract_text_from_pdf(pdf_path):
         page = doc[page_num]
         text = page.get_text()
         full_text += text
+
+    if "References" in full_text:
+        full_text = full_text[:full_text.rfind("References")]
     return full_text
 
 text = extract_text_from_pdf("survey.pdf")
