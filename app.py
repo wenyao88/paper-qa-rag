@@ -98,15 +98,26 @@ def upload():
     if not file.filename.endswith('.pdf'):
         return jsonify({'error': '只支持PDF文件'}), 400
 
-    # 保存上传的文件
+    # 文件大小限制：50MB
+    file.seek(0, 2)
+    file_size_mb = file.tell() / (1024 * 1024)
+    file.seek(0)
+    if file_size_mb > 50:
+        return jsonify({'error': f'文件过大（{file_size_mb:.1f}MB），请上传50MB以内的PDF'}), 400
+
     pdf_path = f"uploads/{file.filename}"
     os.makedirs("uploads", exist_ok=True)
     file.save(pdf_path)
 
-    # 建索引
-    current_index, current_chunks, current_pages = build_index(pdf_path)
+    try:
+        current_index, current_chunks, current_pages = build_index(pdf_path)
+    except Exception as e:
+        return jsonify({'error': f'处理失败：{str(e)}，请检查PDF是否可读'}), 500
 
-    return jsonify({'message': f'上传成功，共处理{len(current_chunks)}个文字块，可以开始提问了'})
+    return jsonify({
+        'message': f'✅ 上传成功，共处理 {len(current_chunks)} 个文字块，可以开始提问了',
+        'chunks': len(current_chunks)
+    })
 
 
 @app.route('/ask', methods=['POST'])
@@ -158,6 +169,12 @@ HTML = """
         #status { margin: 10px 0; color: gray; }
         #answer { margin-top: 20px; padding: 15px; background: #f5f5f5; border-radius: 5px; white-space: pre-wrap; }
         #qa-section { display: none; }
+        .progress-wrap { display:none; margin: 10px 0; }
+        .progress-bar-bg { background:#e0e0e0; border-radius:8px; height:12px; overflow:hidden; }
+        .progress-bar-fill { height:12px; border-radius:8px; background: linear-gradient(90deg,#4CAF50,#81C784);
+            width:0%; transition: width 0.4s ease; animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.7} }
+        .stage-text { font-size:13px; color:#555; margin-top:6px; }
     </style>
 </head>
 <body>
@@ -171,6 +188,12 @@ HTML = """
     </div>
 
     <div id="status"></div>
+    <div class="progress-wrap" id="progressWrap">
+        <div class="progress-bar-bg">
+            <div class="progress-bar-fill" id="progressFill"></div>
+        </div>
+        <div class="stage-text" id="stageText"></div>
+    </div>
 
     <div id="qa-section">
         <input type="text" id="question" placeholder="请输入你的问题..." />
@@ -183,17 +206,51 @@ HTML = """
             const file = document.getElementById('pdfFile').files[0];
             if (!file) { alert('请先选择文件'); return; }
 
-            document.getElementById('status').innerText = '处理中，请稍候（大文件可能需要1-2分钟）...';
+            // 显示进度条
+            const progressWrap = document.getElementById('progressWrap');
+            const progressFill = document.getElementById('progressFill');
+            const stageText = document.getElementById('stageText');
+            progressWrap.style.display = 'block';
+            document.getElementById('status').innerText = '';
+            document.getElementById('qa-section').style.display = 'none';
+
+            // 模拟阶段进度（真实耗时在后端，前端给用户反馈）
+            const stages = [
+                { text: '📄 正在读取PDF文件...', width: '20%' },
+                { text: '✂️ 正在切分文字块...', width: '40%' },
+                { text: '🧠 正在生成向量（最慢的一步）...', width: '60%' },
+                { text: '🗂️ 正在建立索引...', width: '85%' },
+            ];
+            let stageIdx = 0;
+            const stageTimer = setInterval(() => {
+                if (stageIdx < stages.length) {
+                    stageText.innerText = stages[stageIdx].text;
+                    progressFill.style.width = stages[stageIdx].width;
+                    stageIdx++;
+                }
+            }, 2000);
 
             const formData = new FormData();
             formData.append('file', file);
 
-            const res = await fetch('/upload', { method: 'POST', body: formData });
-            const data = await res.json();
+            try {
+                const res = await fetch('/upload', { method: 'POST', body: formData });
+                const data = await res.json();
+                clearInterval(stageTimer);
 
-            document.getElementById('status').innerText = data.message || data.error;
-            if (data.message) {
-                document.getElementById('qa-section').style.display = 'block';
+                if (data.error) {
+                    progressFill.style.width = '100%';
+                    progressFill.style.background = '#e53935';
+                    stageText.innerText = '❌ ' + data.error;
+                } else {
+                    progressFill.style.width = '100%';
+                    stageText.innerText = data.message;
+                    document.getElementById('qa-section').style.display = 'block';
+                }
+            } catch(e) {
+                clearInterval(stageTimer);
+                stageText.innerText = '❌ 网络错误，请检查Flask是否在运行';
+                progressFill.style.background = '#e53935';
             }
         }
 
