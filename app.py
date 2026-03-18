@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 load_dotenv()  # 加载 .env 文件
 API_KEY = os.getenv("SILICONFLOW_API_KEY")  # 从环境变量读取
+ACCESS_PASSWORD = os.getenv("ACCESS_PASSWORD", "904604")
 
 app = Flask(__name__)
 
@@ -109,6 +110,17 @@ def build_index(pdf_path):
 
     return index, chunks, chunk_pages
 
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    if data.get('password') == ACCESS_PASSWORD:
+        return jsonify({'success': True})
+    return jsonify({'success': False, 'error': '密码错误'}), 401
+
+@app.route('/verify', methods=['GET'])
+def verify():
+    # 前端用来检查session是否有效（简单实现）
+    return jsonify({'ok': True})
 
 @app.route('/upload', methods=['POST'])
 def upload():
@@ -598,9 +610,75 @@ HTML = """
         .send-btn:hover:not(:disabled) { background: var(--accent-dark); transform: scale(1.05); }
         .send-btn:disabled { opacity: 0.28; cursor: not-allowed; transform: none; box-shadow: none; }
         .input-hint { text-align: right; font-size: 11px; color: var(--text-muted); margin-top: 5px; }
+        .login-mask {
+            position: fixed; inset: 0;
+            background: var(--main-bg);
+            display: flex; align-items: center; justify-content: center;
+            z-index: 999;
+        }
+        .login-card {
+            background: var(--white);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 40px 36px;
+            width: 340px;
+            box-shadow: var(--shadow-md);
+            text-align: center;
+        }
+        .login-icon {
+            width: 52px; height: 52px;
+            background: var(--accent-light);
+            border: 1px solid var(--accent-border);
+            border-radius: 14px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 24px;
+            margin: 0 auto 16px;
+        }
+        .login-title {
+            font-family: 'Noto Serif SC', serif;
+            font-size: 20px; font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 6px;
+        }
+        .login-sub { font-size: 13px; color: var(--text-muted); margin-bottom: 24px; }
+        .login-input {
+            width: 100%; padding: 10px 14px;
+            border: 1.5px solid var(--border);
+            border-radius: 9px; outline: none;
+            font-family: 'DM Sans', sans-serif;
+            font-size: 14px; color: var(--text-primary);
+            background: var(--main-bg);
+            transition: border-color 0.2s;
+            text-align: center; letter-spacing: 3px;
+        }
+        .login-input:focus { border-color: var(--accent); }
+        .login-btn {
+            width: 100%; margin-top: 12px;
+            padding: 11px;
+            background: var(--accent); border: none;
+            border-radius: 9px; color: white;
+            font-family: 'DM Sans', sans-serif;
+            font-size: 14px; font-weight: 500;
+            cursor: pointer; transition: all 0.18s;
+        }
+        .login-btn:hover { background: var(--accent-dark); }
+        .login-error { font-size: 12px; color: #b91c1c; margin-top: 8px; min-height: 18px; }
     </style>
 </head>
 <body>
+
+<div class="login-mask" id="loginMask">
+    <div class="login-card">
+        <div class="login-icon">🔬</div>
+        <div class="login-title">论文问答助手</div>
+        <div class="login-sub">请输入访问密码</div>
+        <input class="login-input" type="password" id="pwdInput"
+            placeholder="••••••••"
+            onkeydown="if(event.key==='Enter') doLogin()">
+        <button class="login-btn" onclick="doLogin()">进入</button>
+        <div class="login-error" id="loginError"></div>
+    </div>
+</div>
 
 <div class="sidebar">
     <div class="sidebar-top">
@@ -855,6 +933,29 @@ HTML = """
     async function clearHistory() {
         await fetch('/clear_history', {method:'POST'});
         document.getElementById('chatInner').innerHTML = '';
+    }
+    // 登录
+    async function doLogin() {
+        const pwd = document.getElementById('pwdInput').value;
+        if (!pwd) return;
+        const res = await fetch('/login', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({password: pwd})
+        });
+        const data = await res.json();
+        if (data.success) {
+            sessionStorage.setItem('authed', '1');
+            document.getElementById('loginMask').style.display = 'none';
+        } else {
+            document.getElementById('loginError').innerText = '密码错误，请重试';
+            document.getElementById('pwdInput').value = '';
+        }
+    }
+
+    // 页面加载时检查是否已登录
+    if (sessionStorage.getItem('authed') === '1') {
+        document.getElementById('loginMask').style.display = 'none';
     }
 </script>
 </body>
