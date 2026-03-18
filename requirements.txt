@@ -1,0 +1,8 @@
+flask
+requests
+faiss-cpu
+numpy
+pymupdf
+langchain-text-splitters
+openai
+python-dotenv
