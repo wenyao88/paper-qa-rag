@@ -23,6 +23,8 @@ client = OpenAI(
 current_index = None
 current_chunks = None
 current_pages = None
+current_filename = None
+paper_library = {}
 
 
 def get_embedding(texts):
@@ -110,15 +112,43 @@ def upload():
     file.save(pdf_path)
 
     try:
-        current_index, current_chunks, current_pages = build_index(pdf_path)
+        index, chunks, pages = build_index(pdf_path)
     except Exception as e:
         return jsonify({'error': f'处理失败：{str(e)}，请检查PDF是否可读'}), 500
 
+    filename = file.filename
+    paper_library[filename] = {'index': index, 'chunks': chunks, 'pages': pages}
+    current_index, current_chunks, current_pages, current_filename = index, chunks, pages, filename
+
     return jsonify({
-        'message': f'✅ 上传成功，共处理 {len(current_chunks)} 个文字块，可以开始提问了',
-        'chunks': len(current_chunks)
+        'message': f'✅ 上传成功，共处理 {len(chunks)} 个文字块，可以开始提问了',
+        'filename': filename,
+        'paper_list': list(paper_library.keys())
     })
 
+@app.route('/switch', methods=['POST'])
+def switch():
+    global current_index, current_chunks, current_pages, current_filename
+
+    filename = request.json.get('filename')
+    if not filename or filename not in paper_library:
+        return jsonify({'error': '论文不存在'}), 404
+
+    paper = paper_library[filename]
+    current_index = paper['index']
+    current_chunks = paper['chunks']
+    current_pages = paper['pages']
+    current_filename = filename
+
+    return jsonify({'message': f'✅ 已切换到：{filename}'})
+
+
+@app.route('/papers', methods=['GET'])
+def get_papers():
+    return jsonify({
+        'paper_list': list(paper_library.keys()),
+        'current': current_filename
+    })
 
 @app.route('/ask', methods=['POST'])
 def ask():
@@ -202,10 +232,25 @@ HTML = """
             width:0%; transition: width 0.4s ease; animation: pulse 1.5s infinite; }
         @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.7} }
         .stage-text { font-size:13px; color:#555; margin-top:6px; }
+        .layout { display: flex; gap: 20px; }
+        .sidebar { width: 220px; flex-shrink: 0; }
+        .sidebar h4 { margin: 0 0 10px 0; font-size: 14px; color: #333; }
+        .paper-item { padding: 8px 10px; margin-bottom: 6px; background: #fff; border: 1px solid #ddd;
+            border-radius: 6px; cursor: pointer; font-size: 13px; word-break: break-all;
+            transition: all 0.2s; }
+        .paper-item:hover { border-color: #4CAF50; color: #4CAF50; }
+        .paper-item.active { background: #e8f5e9; border-color: #4CAF50; color: #2e7d32; font-weight: bold; }
+        .main-content { flex: 1; min-width: 0; }
     </style>
 </head>
 <body>
     <h2>📄 论文问答助手</h2>
+    <div class="layout">
+    <div class="sidebar">
+        <h4>📚 已上传论文</h4>
+        <div id="paperList"><p style="color:#aaa;font-size:13px">暂无论文</p></div>
+    </div>
+    <div class="main-content">
 
     <div class="upload-area">
         <p>上传你的PDF论文</p>
@@ -273,6 +318,7 @@ HTML = """
                     progressFill.style.width = '100%';
                     stageText.innerText = data.message;
                     document.getElementById('qa-section').style.display = 'block';
+                    renderPaperList(data.paper_list, data.filename);
                 }
             } catch(e) {
                 clearInterval(stageTimer);
@@ -301,7 +347,41 @@ HTML = """
         document.getElementById('question').addEventListener('keypress', function(e) {
             if (e.key === 'Enter') askQuestion();
         });
+        
+        function renderPaperList(paperList, current) {
+            const container = document.getElementById('paperList');
+            if (!paperList || paperList.length === 0) {
+                container.innerHTML = '<p style="color:#aaa;font-size:13px">暂无论文</p>';
+                return;
+            }
+            container.innerHTML = paperList.map(name => `
+                <div class="paper-item ${name === current ? 'active' : ''}"
+                     onclick="switchPaper('${name}')"
+                     title="${name}">
+                    📄 ${name.length > 20 ? name.substring(0,20) + '...' : name}
+                </div>
+            `).join('');
+        }
+
+        async function switchPaper(filename) {
+            const res = await fetch('/switch', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({filename})
+            });
+            const data = await res.json();
+            if (data.message) {
+                // 刷新列表高亮
+                const res2 = await fetch('/papers');
+                const d = await res2.json();
+                renderPaperList(d.paper_list, d.current);
+                document.getElementById('answer').innerText = '';
+                document.getElementById('qa-section').style.display = 'block';
+            }
+        }
     </script>
+    </div><!-- main-content -->
+    </div><!-- layout -->
 </body>
 </html>
 """
