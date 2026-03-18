@@ -59,10 +59,17 @@ ACCESS_PASSWORD=你设置的访问密码
 python app.py
 ```
 
+**4. 公网访问（可选）**
+```
+cloudflared tunnel --url http://localhost:5000
+```
+生成的链接即为公网访问地址，国内无需翻墙，Ctrl+C 关闭后链接立刻失效。
+
 ## 📁 项目结构
 ```
 RAG/
 ├── app.py          
+├── requirements.txt 
 ├── .env            
 └── .gitignore        
 ```
