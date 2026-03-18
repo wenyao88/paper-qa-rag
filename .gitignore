@@ -2,6 +2,7 @@
 survey.pdf
 paper.index
 chunks.pkl
+ngrok.exe
 uploads/
 __pycache__/
 *.pyc
