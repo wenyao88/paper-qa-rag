@@ -25,7 +25,7 @@ current_chunks = None
 current_pages = None
 current_filename = None
 paper_library = {}
-
+chat_history = []
 
 def get_embedding(texts):
     url = "https://api.siliconflow.cn/v1/embeddings"
@@ -126,6 +126,12 @@ def upload():
         'paper_list': list(paper_library.keys())
     })
 
+@app.route('/clear_history', methods=['POST'])
+def clear_history():
+    global chat_history
+    chat_history = []
+    return jsonify({'message': '对话历史已清空'})
+
 @app.route('/switch', methods=['POST'])
 def switch():
     global current_index, current_chunks, current_pages, current_filename
@@ -139,6 +145,7 @@ def switch():
     current_chunks = paper['chunks']
     current_pages = paper['pages']
     current_filename = filename
+    chat_history.clear()
 
     return jsonify({'message': f'✅ 已切换到：{filename}'})
 
@@ -174,7 +181,7 @@ def ask():
         relevant_chunks = [current_chunks[i] for i in indices[0]]
         relevant_pages = [current_pages[i] for i in indices[0]]
 
-        # 相似度过滤：距离太大说明检索内容不相关
+        # 相似度过滤
         min_distance = float(distances[0][0])
         if min_distance > 2.0:
             return jsonify({
@@ -183,23 +190,35 @@ def ask():
             })
 
         context = "\n\n".join(relevant_chunks)
-        prompt = f"""你是一个论文问答助手。请严格根据下面提供的论文片段回答用户的问题，不要编造任何不在原文中的内容。如果提供的内容不足以回答问题，请直接说"根据论文内容无法回答这个问题"。用中文回答。
 
-论文片段：
-{context}
+        # 构建系统提示
+        system_prompt = f"""你是一个论文问答助手。请严格根据下面提供的论文片段回答用户的问题，不要编造任何不在原文中的内容。如果提供的内容不足以回答问题，请直接说"根据论文内容无法回答这个问题"。用中文回答。结合对话历史理解追问意图。
 
-问题：{question}
+    当前检索到的论文片段：
+    {context}"""
 
-请基于以上论文片段直接回答，不要说"根据您提供的内容"这类废话，直接给出答案。
-"""
+        # 组装消息：系统提示 + 历史对话 + 当前问题
+        messages = [{"role": "system", "content": system_prompt}]
+        # 只保留最近3轮历史，避免token超限
+        for h in chat_history[-3:]:
+            messages.append({"role": "user", "content": h['question']})
+            messages.append({"role": "assistant", "content": h['answer']})
+        messages.append({"role": "user", "content": question})
+
         response = client.chat.completions.create(
             model="Qwen/Qwen2.5-72B-Instruct",
-            messages=[{"role": "user", "content": prompt}],
-            timeout=30  # 超时30秒
+            messages=messages,
+            timeout=30
         )
+        answer = response.choices[0].message.content
+
+        # 存入历史
+        chat_history.append({'question': question, 'answer': answer})
+
         return jsonify({
-            'answer': response.choices[0].message.content,
-            'sources': list(set(relevant_pages))
+            'answer': answer,
+            'sources': list(set(relevant_pages)),
+            'history_count': len(chat_history)
         })
 
     except Exception as e:
@@ -241,6 +260,18 @@ HTML = """
         .paper-item:hover { border-color: #4CAF50; color: #4CAF50; }
         .paper-item.active { background: #e8f5e9; border-color: #4CAF50; color: #2e7d32; font-weight: bold; }
         .main-content { flex: 1; min-width: 0; }
+        .chat-box { max-height: 450px; overflow-y: auto; display: flex;
+            flex-direction: column; gap: 12px; margin-top: 15px; }
+        .msg-user { align-self: flex-end; background: #4CAF50; color: white;
+            padding: 8px 14px; border-radius: 16px 16px 4px 16px; max-width: 80%; font-size: 14px; }
+        .msg-bot { align-self: flex-start; background: #f1f1f1; color: #333;
+            padding: 8px 14px; border-radius: 16px 16px 16px 4px; max-width: 90%; font-size: 14px; white-space: pre-wrap; }
+        .msg-source { font-size: 12px; color: #999; margin-top: 4px; align-self: flex-start; }
+        .clear-btn { font-size: 12px; color: #999; background: none; border: none;
+            cursor: pointer; padding: 0; margin-left: 10px; }
+        .clear-btn:hover { color: #e53935; }
+        .input-row { display: flex; gap: 8px; margin-top: 10px; }
+        .input-row input { flex: 1; padding: 10px; font-size: 15px; border: 1px solid #ddd; border-radius: 6px; }
     </style>
 </head>
 <body>
@@ -268,9 +299,15 @@ HTML = """
     </div>
 
     <div id="qa-section">
-        <input type="text" id="question" placeholder="请输入你的问题..." />
-        <button onclick="askQuestion()">提问</button>
-        <div id="answer"></div>
+        <div style="display:flex; align-items:center; margin-bottom:4px;">
+            <span style="font-size:14px;color:#555;">💬 对话区</span>
+            <button class="clear-btn" onclick="clearHistory()">🗑️ 清空对话</button>
+        </div>
+        <div class="chat-box" id="chatBox"></div>
+        <div class="input-row">
+            <input type="text" id="question" placeholder="输入问题，支持追问..." />
+            <button onclick="askQuestion()">提问</button>
+        </div>
     </div>
 
     <script>
@@ -327,21 +364,50 @@ HTML = """
             }
         }
 
+        function appendMsg(role, text, sources) {
+            const box = document.getElementById('chatBox');
+            const div = document.createElement('div');
+            div.className = role === 'user' ? 'msg-user' : 'msg-bot';
+            div.innerText = text;
+            box.appendChild(div);
+            if (sources && sources.length > 0) {
+                const src = document.createElement('div');
+                src.className = 'msg-source';
+                src.innerText = '📄 参考页码：第' + sources.join('、') + '页';
+                box.appendChild(src);
+            }
+            box.scrollTop = box.scrollHeight;  // 自动滚到底部
+        }
+
         async function askQuestion() {
-            const q = document.getElementById('question').value;
+            const input = document.getElementById('question');
+            const q = input.value.trim();
             if (!q) return;
-            document.getElementById('answer').innerText = '思考中...';
+
+            appendMsg('user', q);
+            input.value = '';
+
+            // 显示加载中
+            const loadingDiv = document.createElement('div');
+            loadingDiv.className = 'msg-bot';
+            loadingDiv.innerText = '思考中...';
+            loadingDiv.id = 'loadingMsg';
+            document.getElementById('chatBox').appendChild(loadingDiv);
+
             const res = await fetch('/ask', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({question: q})
             });
             const data = await res.json();
-            document.getElementById('answer').innerText = data.answer;
-            if (data.sources) {
-                document.getElementById('answer').innerText += 
-                    '\\n\\n📄 参考页码：第' + data.sources.join('、') + '页';
-                    }
+
+            document.getElementById('loadingMsg')?.remove();
+            appendMsg('bot', data.answer, data.sources);
+        }
+
+        async function clearHistory() {
+            await fetch('/clear_history', {method: 'POST'});
+            document.getElementById('chatBox').innerHTML = '';
         }
 
         document.getElementById('question').addEventListener('keypress', function(e) {
