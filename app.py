@@ -27,6 +27,27 @@ current_filename = None
 paper_library = {}
 chat_history = []
 
+def hyde_query(question):
+    """
+    HyDE：Hypothetical Document Embeddings
+    核心思想：用大模型生成假设答案，用假设答案的向量去检索，
+    而不是用问题本身的向量。假设答案和论文原文语义空间更接近。
+    """
+    prompt = f"""你是一个学术论文专家。请根据下面的问题，生成一段简短的英文学术文本，
+就像这个问题的答案直接出现在论文中一样。只生成英文文本，不要解释，不要说"假设"，直接写内容，2-4句话即可。
+
+问题：{question}"""
+    try:
+        response = client.chat.completions.create(
+            model="Qwen/Qwen2.5-72B-Instruct",
+            messages=[{"role": "user", "content": prompt}],
+            timeout=15
+        )
+        hypothetical_answer = response.choices[0].message.content.strip()
+        return hypothetical_answer
+    except:
+        return question  # 生成失败则退回原始问题
+
 def get_embedding(texts):
     url = "https://api.siliconflow.cn/v1/embeddings"
     headers = {
@@ -60,7 +81,7 @@ def build_index(pdf_path):
     if "References" in full_text:
         full_text = full_text[:full_text.rfind("References")]
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
     chunks = splitter.split_text(full_text)
 
     # 给每块找到对应页码
@@ -176,12 +197,12 @@ def ask():
 
     try:
         # 检索
-        q_vector = np.array(get_embedding([question])).astype('float32')
-        distances, indices = current_index.search(q_vector, 5)
-        relevant_chunks = [current_chunks[i] for i in indices[0]]
-        relevant_pages = [current_pages[i] for i in indices[0]]
+        # 检索：多取几个候选，再过滤
+        hyde_doc = hyde_query(question)  # 生成假设答案
+        q_vector = np.array(get_embedding([hyde_doc])).astype('float32')
+        distances, indices = current_index.search(q_vector, 15)
 
-        # 相似度过滤
+        # 最相关的一个距离太大，说明整篇论文都没有相关内容
         min_distance = float(distances[0][0])
         if min_distance > 2.0:
             return jsonify({
@@ -189,13 +210,43 @@ def ask():
                 'sources': []
             })
 
+        # 重排序：只保留距离小于阈值的chunk，最多取5个
+        DISTANCE_THRESHOLD = 1.5
+        filtered = [
+            (distances[0][i], indices[0][i])
+            for i in range(len(indices[0]))
+            if distances[0][i] < DISTANCE_THRESHOLD
+        ]
+        # 如果过滤后不足3个，放宽阈值取前3个保底
+        if len(filtered) < 3:
+            filtered = [(distances[0][i], indices[0][i]) for i in range(5)]
+
+        # 按距离从小到大排序（最相关的排前面）
+        filtered.sort(key=lambda x: x[0])
+        top = filtered[:7]
+
+        relevant_chunks = [current_chunks[idx] for _, idx in top]
+        relevant_pages = [current_pages[idx] for _, idx in top]
+
         context = "\n\n".join(relevant_chunks)
 
         # 构建系统提示
-        system_prompt = f"""你是一个论文问答助手。请严格根据下面提供的论文片段回答用户的问题，不要编造任何不在原文中的内容。如果提供的内容不足以回答问题，请直接说"根据论文内容无法回答这个问题"。用中文回答。结合对话历史理解追问意图。
+        system_prompt = f"""你是一个严谨的学术论文问答助手。
 
-    当前检索到的论文片段：
-    {context}"""
+        【强制规则】
+        1. 只能使用下方"论文片段"中明确出现的信息回答问题
+        2. 数字、指标、方法名必须与原文完全一致，不得修改或推断
+        3. 如果片段中没有足够信息，直接回答"论文提供的片段中未包含该信息"
+        4. 禁止结合任何外部知识进行补充或推断
+        5. 回答时注明信息来自哪个具体论点或实验
+
+        【论文片段】
+        {context}
+
+        【回答格式】
+        - 直接给出答案，不要说"根据论文"等废话
+        - 如涉及数据，用"论文指出：XXX"的形式明确标注是原文内容
+        - 结合对话历史理解追问意图"""
 
         # 组装消息：系统提示 + 历史对话 + 当前问题
         messages = [{"role": "system", "content": system_prompt}]
